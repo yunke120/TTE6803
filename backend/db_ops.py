@@ -4,9 +4,23 @@ from sqlalchemy import create_engine, Column, Integer, Float, Boolean, DateTime
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 import datetime
+import os
+import sys
+
+print(os.path.dirname(__file__))
+
+basedir = os.path.join(os.path.dirname(__file__), 'database')
+
+WIN = sys.platform.startswith('win')
+if WIN:
+    prefix = 'sqlite:///'
+else:
+    prefix = 'sqlite:////'
 
 # 创建数据库连接
-DATABASE_URL = 'sqlite:///database/data.db'
+# DATABASE_URL = 'sqlite:///database/data.db'
+DATABASE_URL = prefix + basedir.replace('\\', '/') + '/data.db'
+
 engine = create_engine(DATABASE_URL)
 Base = declarative_base()
 

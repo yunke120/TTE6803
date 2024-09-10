@@ -4,7 +4,7 @@ from enum import Enum
 from scapy.all import *
 from utils import *
 from db_ops import DatabaseOperations
-
+from apscheduler.schedulers.background import BackgroundScheduler
 
 
 class BPFType(Enum):
@@ -23,6 +23,7 @@ class App(Namespace):
         # 设置AS6803的阈值，最小为2.75V, 最大为4.2V
         self.MIN_VOLTAGE = 2.75 
         self.MAX_VOLTAGE = 4.2
+        self.STEP_VOLTAGE = 0.010
         self.send_cmd = 'A55A08A1000000000000'
         # 创建UDP套接字
         self.sock_as6803 = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -82,6 +83,10 @@ class App(Namespace):
         
         self.cnt = self.SAVE_FRAME_INTERVAL
 
+        self.scheduler = BackgroundScheduler()
+        self.job = None
+        self.increasing = True
+
 ######################### AS6803 ###################################################
 
     def on_connect_as6803(self, msg):
@@ -95,14 +100,11 @@ class App(Namespace):
     def on_close_as6803(self):
         self.sock_as6803.close()
 
-    def on_set_voltage(self, msg):
-        print(msg)
-        self.start_time = time.time() # 开始计时
+    def on_set_voltage(self, msg) -> bool:
         voltage = float(msg['voltage'])
         if voltage < self.MIN_VOLTAGE or voltage > self.MAX_VOLTAGE:
             emit("log_msg", "电压值超限: 请设置[2.75,4.2]")
             return False   # 无效通道和电压
-        # return True
         ch = 1
         voltage = int(voltage * 1000)
         v_hex_str = "".join(f"{voltage:08x}")
@@ -123,15 +125,11 @@ class App(Namespace):
         try:
             ret = self.sock_as6803.send(bytes.fromhex(self.send_cmd))
         except OSError as e:
-            # emit("log_msg", "设置失败: "+str(e))
             return False
         if ret == 10:
             self.vol_set = voltage/1000.0
-            # self.notify(self.vol_set)
-            # emit("log_msg", "设置电压成功")
             return True
         else:
-            # emit("log_msg", "设置电压失败")
             return False
 
     def on_get_voltage(self):
@@ -172,24 +170,12 @@ class App(Namespace):
             return
         # print("---")
         # print(payload.hex())
-        # flag = True
-
         self.cnt = self.cnt - 1
         for i in range(0, len(payload_vol), 2):
             temp = combine_value(payload_vol[i], payload_vol[i+1]) # 合并数据
             temp = convert_voltage(temp)    # 采样值转实际值
-            # print(int(i/2))
             self.data[int(i/2)]['value'] = temp
-            # if (temp < self.vol_set + 0.005) and (temp > self.vol_set - 0.005):
-            #     self.stop_flag = True
-            # else:
-            #     self.stop_flag = False
-            #     flag = False
             voltage_list.append(temp)
-        # if flag and self.stop_flag:
-        #     self.end_time = time.time()
-        #     elapsed_time = self.end_time - self.start_time  # 计算耗时
-        #     print(f"程序耗时：{elapsed_time} 秒")
         self.idx += 1
         self.data[22]['value'] = self.idx
         R = self._8808_measure_resistance()
@@ -200,15 +186,7 @@ class App(Namespace):
         if self.cnt == 0:
             self.db_ops.add_record(self.idx, T, self.vol_set, voltage_list) # 保存数据库
             self.cnt = self.SAVE_FRAME_INTERVAL
-            # print("-")
-        # emit()
-
-        # print('收发计数：' + str(self.idx), end=' ')
-        # print('采样电压：', voltage_list)
-        # print('发送数据')
-        # print(self.data)
         emit("telemetry_value", self.data)
-        # print('发送完成')
 
     def on_start_tte_recv(self):
         """启动接收"""
@@ -293,4 +271,41 @@ class App(Namespace):
         self.resistance_measured = self._8808_tranform(self.resistance_measured)
         return self.resistance_measured
     
-    
+######################### 定时任务 ###################################################
+    def on_start_scheduler(self, T):
+        self.scheduler.add_job(self.job_timing, 'interval', seconds=T['timing'], id="timing_job")
+
+    def on_stop_scheduler(self):
+        self.job.remove()
+        self.scheduler.remove_job(id='timing_job')
+
+    def job_timing(self):
+        vol = self.vol_set
+
+        if self.increasing:
+            vol += self.STEP_VOLTAGE
+            if vol >= self.MAX_VOLTAGE:
+                vol = self.MAX_VOLTAGE
+                self.increasing = False
+                data = {'voltage', vol}
+                ret = self.on_set_voltage(data)
+                if ret:
+                    self.vol_set = vol
+                else:
+                    pass
+        else:
+            vol -= self.STEP_VOLTAGE
+            if vol <= self.MIN_VOLTAGE:
+                vol = self.MIN_VOLTAGE
+                self.increasing = True
+                data = {'voltage', vol}
+                ret = self.on_set_voltage(data)
+                if ret:
+                    self.vol_set = vol
+                else:
+                    pass
+
+    def on_set_save_interval(self, msg):
+        self.SAVE_FRAME_INTERVAL = msg['interval']
+
+
